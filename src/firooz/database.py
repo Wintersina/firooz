@@ -1,0 +1,224 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from firooz.models import Base, BannedTrack, Config, Karma, KarmaLog, Memory, PlayedTrack
+
+
+class KarmaDB:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+
+    @classmethod
+    async def init(cls, db_path: str) -> KarmaDB:
+        url = f"sqlite+aiosqlite:///{db_path}" if db_path != ":memory:" else "sqlite+aiosqlite://"
+        engine = create_async_engine(url)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        return cls(session_factory)
+
+    async def get_config(self, key: str) -> str | None:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(Config.value).where(Config.key == key)
+            )
+            row = result.scalar_one_or_none()
+            return row
+
+    async def update_karma(
+        self,
+        guild_id: int,
+        user_id: int,
+        delta: int,
+        given_by: int = 0,
+        reason: str = "",
+    ) -> int:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(Karma).where(
+                    Karma.guild_id == guild_id, Karma.user_id == user_id
+                )
+            )
+            karma = result.scalar_one_or_none()
+
+            if karma is None:
+                karma = Karma(guild_id=guild_id, user_id=user_id, points=delta)
+                session.add(karma)
+            else:
+                karma.points += delta
+
+            session.add(KarmaLog(
+                guild_id=guild_id,
+                user_id=user_id,
+                given_by=given_by,
+                delta=delta,
+                reason=reason,
+            ))
+
+            await session.commit()
+            return karma.points
+
+    async def get_history(
+        self, guild_id: int, user_id: int, limit: int = 10
+    ) -> list[tuple[int, int, str, str]]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(
+                    KarmaLog.given_by,
+                    KarmaLog.delta,
+                    KarmaLog.reason,
+                    KarmaLog.created_at,
+                )
+                .where(KarmaLog.guild_id == guild_id, KarmaLog.user_id == user_id)
+                .order_by(KarmaLog.created_at.desc())
+                .limit(limit)
+            )
+            return [(row[0], row[1], row[2], str(row[3])) for row in result.all()]
+
+    async def get_karma(self, guild_id: int, user_id: int) -> int:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(Karma.points).where(
+                    Karma.guild_id == guild_id, Karma.user_id == user_id
+                )
+            )
+            points = result.scalar_one_or_none()
+            return points if points is not None else 0
+
+    async def get_leaderboard(
+        self, guild_id: int, limit: int = 10
+    ) -> list[tuple[int, int]]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(Karma.user_id, Karma.points)
+                .where(Karma.guild_id == guild_id)
+                .order_by(Karma.points.desc())
+                .limit(limit)
+            )
+            return [(row[0], row[1]) for row in result.all()]
+
+    async def save_memory(
+        self, guild_id: int, key: str, value: str, saved_by: int
+    ) -> None:
+        async with self._session_factory() as session:
+            session.add(Memory(
+                guild_id=guild_id,
+                key=key.lower(),
+                value=value,
+                saved_by=saved_by,
+            ))
+            await session.commit()
+
+    async def get_memory(self, guild_id: int, key: str) -> str | None:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(Memory.value)
+                .where(Memory.guild_id == guild_id, Memory.key == key.lower())
+                .order_by(Memory.created_at.desc())
+                .limit(1)
+            )
+            return result.scalar_one_or_none()
+
+    async def list_memories(self, guild_id: int, limit: int = 20) -> list[tuple[str, str, str]]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(Memory.key, Memory.value, Memory.created_at)
+                .where(Memory.guild_id == guild_id)
+                .order_by(Memory.created_at.desc())
+                .limit(limit)
+            )
+            return [(row[0], row[1], str(row[2])) for row in result.all()]
+
+    async def delete_memory(self, guild_id: int, key: str) -> bool:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(Memory).where(
+                    Memory.guild_id == guild_id, Memory.key == key.lower()
+                )
+            )
+            memories = result.scalars().all()
+            if not memories:
+                return False
+            for m in memories:
+                await session.delete(m)
+            await session.commit()
+            return True
+
+    async def record_played_track(
+        self, guild_id: int, url: str, title: str, query: str
+    ) -> None:
+        async with self._session_factory() as session:
+            session.add(PlayedTrack(
+                guild_id=guild_id, url=url, title=title, query=query,
+            ))
+            await session.commit()
+
+    async def get_recently_played_urls(
+        self, guild_id: int, days: int = 7
+    ) -> set[str]:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(PlayedTrack.url)
+                .where(
+                    PlayedTrack.guild_id == guild_id,
+                    PlayedTrack.played_at >= cutoff,
+                )
+            )
+            return {row[0] for row in result.all()}
+
+    async def ban_track(
+        self, guild_id: int, url: str, title: str, banned_by: int
+    ) -> bool:
+        """Ban a track. Returns False if already banned."""
+        async with self._session_factory() as session:
+            existing = await session.execute(
+                select(BannedTrack).where(
+                    BannedTrack.guild_id == guild_id, BannedTrack.url == url
+                )
+            )
+            if existing.scalar_one_or_none():
+                return False
+            session.add(BannedTrack(
+                guild_id=guild_id, url=url, title=title, banned_by=banned_by,
+            ))
+            await session.commit()
+            return True
+
+    async def unban_track(self, guild_id: int, url: str) -> bool:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(BannedTrack).where(
+                    BannedTrack.guild_id == guild_id, BannedTrack.url == url
+                )
+            )
+            track = result.scalar_one_or_none()
+            if not track:
+                return False
+            await session.delete(track)
+            await session.commit()
+            return True
+
+    async def get_banned_urls(self, guild_id: int) -> set[str]:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(BannedTrack.url).where(BannedTrack.guild_id == guild_id)
+            )
+            return {row[0] for row in result.all()}
+
+    async def list_banned_tracks(self, guild_id: int) -> list[tuple[str, str]]:
+        """Return (title, url) pairs of banned tracks."""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(BannedTrack.title, BannedTrack.url)
+                .where(BannedTrack.guild_id == guild_id)
+                .order_by(BannedTrack.banned_at.desc())
+            )
+            return [(row[0], row[1]) for row in result.all()]
+
+    async def close(self) -> None:
+        pass
