@@ -510,8 +510,10 @@ class MusicCog(commands.Cog, name="Music"):
 
         # Someone joined the channel the bot is in
         if after.channel and after.channel == vc.channel and before.channel != after.channel:
+            # Wait for Discord to finish the voice state change
+            await asyncio.sleep(1.0)
             vc.pause()
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.5)
             vc.resume()
             logger.info("Audio resync: %s joined voice channel", member.display_name)
 
