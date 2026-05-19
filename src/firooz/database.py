@@ -2,10 +2,20 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from firooz.models import Base, BannedTrack, Config, Karma, KarmaLog, Memory, PlayedTrack
+from firooz.models import (
+    Base,
+    BannedTrack,
+    Config,
+    Karma,
+    KarmaLog,
+    Memory,
+    PlayedTrack,
+    Poem,
+    SharedPoem,
+)
 
 
 class KarmaDB:
@@ -28,6 +38,18 @@ class KarmaDB:
             )
             row = result.scalar_one_or_none()
             return row
+
+    async def set_config(self, key: str, value: str) -> None:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(Config).where(Config.key == key)
+            )
+            existing = result.scalar_one_or_none()
+            if existing is None:
+                session.add(Config(key=key, value=value))
+            else:
+                existing.value = value
+            await session.commit()
 
     async def update_karma(
         self,
@@ -219,6 +241,45 @@ class KarmaDB:
                 .order_by(BannedTrack.banned_at.desc())
             )
             return [(row[0], row[1]) for row in result.all()]
+
+    async def get_poem_count(self) -> int:
+        async with self._session_factory() as session:
+            result = await session.execute(select(func.count(Poem.id)))
+            return result.scalar_one()
+
+    async def get_random_poem(self, guild_id: int) -> Poem | None:
+        """Get a random poem not shared in this guild in the past year."""
+        one_year_ago = datetime.now(timezone.utc) - timedelta(days=365)
+        async with self._session_factory() as session:
+            recently_shared = (
+                select(SharedPoem.poem_id)
+                .where(
+                    SharedPoem.guild_id == guild_id,
+                    SharedPoem.shared_at >= one_year_ago,
+                )
+            )
+            result = await session.execute(
+                select(Poem)
+                .where(Poem.id.not_in(recently_shared))
+                .order_by(func.random())
+                .limit(1)
+            )
+            return result.scalar_one_or_none()
+
+    async def record_shared_poem(self, guild_id: int, poem_id: int) -> None:
+        async with self._session_factory() as session:
+            session.add(SharedPoem(guild_id=guild_id, poem_id=poem_id))
+            await session.commit()
+
+    async def get_last_shared_time(self, guild_id: int) -> datetime | None:
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(SharedPoem.shared_at)
+                .where(SharedPoem.guild_id == guild_id)
+                .order_by(SharedPoem.shared_at.desc())
+                .limit(1)
+            )
+            return result.scalar_one_or_none()
 
     async def close(self) -> None:
         pass

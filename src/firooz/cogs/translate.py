@@ -3,8 +3,9 @@ from __future__ import annotations
 import logging
 
 import discord
-from deep_translator import GoogleTranslator
 from discord.ext import commands
+
+from firooz.ollama import translate
 
 logger = logging.getLogger("firooz.translate")
 
@@ -39,16 +40,9 @@ class TranslateCog(commands.Cog, name="Translate"):
             await ctx.send("Usage: reply to a message with `!tr` or use `!tr <text>`")
             return
 
-        try:
-            translator = GoogleTranslator(source="auto", target="en")
-            translated = translator.translate(source_text)
-        except Exception:
-            logger.exception("Translation failed for: %s", source_text[:50])
-            await ctx.send("Translation failed. Try again later.")
-            return
-
-        if not translated or translated.strip().lower() == source_text.strip().lower():
-            await ctx.send("Already in English (or couldn't detect a different language).")
+        translated = await translate(source_text, target="English")
+        if not translated:
+            await ctx.send("Translation failed. Is Ollama running? (`ollama serve`)")
             return
 
         reply_text = f"**Translation:** {translated}"

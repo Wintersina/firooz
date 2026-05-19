@@ -30,11 +30,16 @@ MILESTONE_EMOJIS: dict[int, str] = {
 }
 
 
-def format_karma_response(username: str, points: int, delta: int, reason: str = "") -> str:
+def format_karma_response(
+    username: str, points: int, delta: int, reason: str = "", given_by: str = ""
+) -> str:
     abs_delta = abs(delta)
     direction = "gained" if delta > 0 else "lost"
     point_word = "point" if abs_delta == 1 else "points"
     msg = f"**{username}** {direction} **{abs_delta}** {point_word}! They now have **{points}** karma."
+    if given_by:
+        action = "from" if delta > 0 else "by"
+        msg += f" ({action} **{given_by}**)"
     if reason:
         msg += f"\n> *{reason}*"
     milestone_emoji = MILESTONE_EMOJIS.get(points)

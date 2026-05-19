@@ -49,6 +49,12 @@ A multi-feature Discord bot that runs locally on macOS. Built with Python, disco
 - `!memories` / `!mems` — list all saved notes
 - `!forget <key>` — delete a note
 
+### Poetry
+- `!poem` / `!faal` — random Persian poem (Hafez, Rumi, Saadi)
+- Daily auto-post of a poem to `#bot_zone`
+- 8,700+ poems from the ChronologicalPersianPoetryDataset
+- Same poem won't repeat in a guild for a full year
+
 ### Translate
 - `!translate` / `!tr` (as a reply) — translate any message to English
 - `!tr <text>` — translate inline text
@@ -118,12 +124,16 @@ make run
 | `!recall <key>` | `!r` | Recall a note |
 | `!memories` | `!mems` | List all notes |
 | `!forget <key>` | | Delete a note |
+| `!poem` | `!faal` | Random Persian poem |
 | `!translate` | `!tr` | Translate to English |
 | `!commands` | `!help` | Show all commands |
 
 ## Development
 
 ```bash
+# Import Persian poems (first time only)
+make import-poems
+
 # Run tests
 make test
 

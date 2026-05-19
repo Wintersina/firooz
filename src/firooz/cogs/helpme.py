@@ -18,7 +18,7 @@ class HelpMeCog(commands.Cog, name="Help"):
             color=0x5865F2,
         )
 
-        cog_order = ["Karma", "Music", "Vibe", "Waifu", "Remember", "Translate", "Help"]
+        cog_order = ["Karma", "Music", "Vibe", "Waifu", "Remember", "Translate", "Poetry", "Help"]
 
         for cog_name in cog_order:
             cog = self.bot.get_cog(cog_name)

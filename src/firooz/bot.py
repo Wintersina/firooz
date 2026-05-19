@@ -20,6 +20,7 @@ COGS: list[str] = [
     "firooz.cogs.waifu",
     "firooz.cogs.music",
     "firooz.cogs.translate",
+    "firooz.cogs.poetry",
     "firooz.cogs.helpme",
 ]
 

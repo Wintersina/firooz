@@ -17,6 +17,19 @@ logger = logging.getLogger("firooz.karma")
 
 BOT_ZONE_CHANNEL = "bot_zone"
 
+
+def _describe_message(message: discord.Message) -> str:
+    """Build a text description of a message: content, attachments, or embeds."""
+    parts: list[str] = []
+    if message.content:
+        parts.append(message.content)
+    for att in message.attachments:
+        parts.append(att.url)
+    for embed in message.embeds:
+        if embed.url:
+            parts.append(embed.url)
+    return "\n".join(parts) if parts else "(no text)"
+
 KARMA_REACTIONS: dict[str, int] = {
     "\U0001f44d": 1,   # 👍
     "\U0001f44e": -1,  # 👎
@@ -33,6 +46,20 @@ KARMA_REACTIONS: dict[str, int] = {
     "\U0001f61d": 1,   # 😝 squinting tongue
     "\U0001f911": 1,   # 🤑 money mouth (laughing variant)
 }
+
+# Custom server emojis (matched by name)
+CUSTOM_KARMA_REACTIONS: dict[str, int] = {
+    "pornhub": 2,
+}
+
+
+def _get_reaction_delta(emoji: discord.PartialEmoji) -> int | None:
+    """Get karma delta for a reaction emoji (unicode or custom)."""
+    if emoji.id is not None:
+        # Custom emoji — match by name
+        return CUSTOM_KARMA_REACTIONS.get(emoji.name or "")
+    # Unicode emoji — match by string
+    return KARMA_REACTIONS.get(str(emoji))
 
 
 def _find_bot_zone(guild: discord.Guild) -> discord.TextChannel | None:
@@ -52,9 +79,9 @@ class KarmaCog(commands.Cog, name="Karma"):
     ) -> None:
         bot_zone = _find_bot_zone(guild)
         if bot_zone:
-            await bot_zone.send(response)
+            await bot_zone.send(response, suppress_embeds=True)
         else:
-            await fallback_channel.send(response)
+            await fallback_channel.send(response, suppress_embeds=True)
 
     @commands.Cog.listener()
     async def on_cog_message(self, message: discord.Message) -> None:
@@ -78,13 +105,15 @@ class KarmaCog(commands.Cog, name="Karma"):
 
             member = message.guild.get_member(action.user_id)
             username = member.display_name if member else f"User {action.user_id}"
-            response = format_karma_response(username, new_total, action.delta, action.reason)
+            response = format_karma_response(
+                username, new_total, action.delta, action.reason,
+                given_by=message.author.display_name,
+            )
             await self._send_karma_update(message.guild, response, message.channel)
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
-        emoji = str(payload.emoji)
-        delta = KARMA_REACTIONS.get(emoji)
+        delta = _get_reaction_delta(payload.emoji)
         if delta is None or payload.guild_id is None or payload.member is None:
             return
         if payload.member.bot:
@@ -102,25 +131,32 @@ class KarmaCog(commands.Cog, name="Karma"):
         if guild is None:
             return
 
+        emoji_str = str(payload.emoji)
+        msg_text = _describe_message(message)
+        reason = f"{emoji_str} reaction for: {msg_text}"
+        display_reason = f"{emoji_str} reaction for: {msg_text[:100]}"
+
         new_total = await self.db.update_karma(
             guild_id=payload.guild_id,
             user_id=message.author.id,
             delta=delta,
             given_by=payload.member.id,
-            reason=f"{emoji} reaction",
+            reason=reason,
         )
         username = message.author.display_name
-        response = format_karma_response(username, new_total, delta, f"{emoji} reaction")
+        reactor_name = payload.member.display_name
+        response = format_karma_response(
+            username, new_total, delta, display_reason, given_by=reactor_name,
+        )
         await self._send_karma_update(guild, response, channel)
         logger.info(
             "[#%s] %s reacted %s on %s's message → %d karma",
-            channel.name, payload.member, emoji, message.author, new_total,
+            channel.name, payload.member, emoji_str, message.author, new_total,
         )
 
     @commands.Cog.listener()
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent) -> None:
-        emoji = str(payload.emoji)
-        delta = KARMA_REACTIONS.get(emoji)
+        delta = _get_reaction_delta(payload.emoji)
         if delta is None or payload.guild_id is None:
             return
 
@@ -139,20 +175,28 @@ class KarmaCog(commands.Cog, name="Karma"):
         if message.author.bot or message.author.id == payload.user_id:
             return
 
+        emoji_str = str(payload.emoji)
         reverse_delta = -delta
+        msg_text = _describe_message(message)
+        reason = f"{emoji_str} reaction removed for: {msg_text}"
+        display_reason = f"{emoji_str} reaction removed for: {msg_text[:100]}"
+
         new_total = await self.db.update_karma(
             guild_id=payload.guild_id,
             user_id=message.author.id,
             delta=reverse_delta,
             given_by=payload.user_id,
-            reason=f"{emoji} reaction removed",
+            reason=reason,
         )
         username = message.author.display_name
-        response = format_karma_response(username, new_total, reverse_delta, f"{emoji} reaction removed")
+        reactor_name = reactor.display_name
+        response = format_karma_response(
+            username, new_total, reverse_delta, display_reason, given_by=reactor_name,
+        )
         await self._send_karma_update(guild, response, channel)
         logger.info(
             "[#%s] %s removed %s on %s's message → %d karma",
-            channel.name, reactor, emoji, message.author, new_total,
+            channel.name, reactor, emoji_str, message.author, new_total,
         )
 
     @commands.command(name="leaderboard", aliases=["lb"])  # type: ignore[arg-type]

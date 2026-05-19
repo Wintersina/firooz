@@ -39,13 +39,9 @@ def _make_ref_message(content: str = "hola mundo") -> MagicMock:
 
 
 class TestTranslateCommand:
-    @patch("firooz.cogs.translate.GoogleTranslator")
-    async def test_translate_reply(self, mock_translator_cls: MagicMock) -> None:
+    @patch("firooz.cogs.translate.translate", new_callable=AsyncMock, return_value="hello world")
+    async def test_translate_reply(self, mock_translate: AsyncMock) -> None:
         """Reply to a non-English message with !tr — translates and replies to original."""
-        mock_instance = MagicMock()
-        mock_instance.translate.return_value = "hello world"
-        mock_translator_cls.return_value = mock_instance
-
         bot = _make_mock_bot()
         cog = TranslateCog(bot)
         ref = _make_reply_reference()
@@ -61,13 +57,9 @@ class TestTranslateCommand:
         assert "hello world" in call_text
         assert "Translation" in call_text
 
-    @patch("firooz.cogs.translate.GoogleTranslator")
-    async def test_translate_inline_text(self, mock_translator_cls: MagicMock) -> None:
+    @patch("firooz.cogs.translate.translate", new_callable=AsyncMock, return_value="good morning")
+    async def test_translate_inline_text(self, mock_translate: AsyncMock) -> None:
         """Use !tr <text> without replying — translates and replies to command message."""
-        mock_instance = MagicMock()
-        mock_instance.translate.return_value = "good morning"
-        mock_translator_cls.return_value = mock_instance
-
         bot = _make_mock_bot()
         cog = TranslateCog(bot)
         ctx = _make_mock_ctx()
@@ -106,30 +98,9 @@ class TestTranslateCommand:
         call_text = ctx.send.call_args[0][0]
         assert "no text" in call_text
 
-    @patch("firooz.cogs.translate.GoogleTranslator")
-    async def test_translate_already_english(self, mock_translator_cls: MagicMock) -> None:
-        """Text that's already English — informs user."""
-        mock_instance = MagicMock()
-        mock_instance.translate.return_value = "hello"
-        mock_translator_cls.return_value = mock_instance
-
-        bot = _make_mock_bot()
-        cog = TranslateCog(bot)
-        ctx = _make_mock_ctx()
-
-        await cog.translate.callback(cog, ctx, text="hello")
-
-        ctx.send.assert_called_once()
-        call_text = ctx.send.call_args[0][0]
-        assert "Already in English" in call_text
-
-    @patch("firooz.cogs.translate.GoogleTranslator")
-    async def test_translate_failure(self, mock_translator_cls: MagicMock) -> None:
-        """Translation API fails — shows error message."""
-        mock_instance = MagicMock()
-        mock_instance.translate.side_effect = Exception("API error")
-        mock_translator_cls.return_value = mock_instance
-
+    @patch("firooz.cogs.translate.translate", new_callable=AsyncMock, return_value=None)
+    async def test_translate_failure(self, mock_translate: AsyncMock) -> None:
+        """Translation fails — shows error message."""
         bot = _make_mock_bot()
         cog = TranslateCog(bot)
         ctx = _make_mock_ctx()
@@ -140,13 +111,9 @@ class TestTranslateCommand:
         call_text = ctx.send.call_args[0][0]
         assert "failed" in call_text.lower()
 
-    @patch("firooz.cogs.translate.GoogleTranslator")
-    async def test_reply_uses_mention_author_false(self, mock_translator_cls: MagicMock) -> None:
+    @patch("firooz.cogs.translate.translate", new_callable=AsyncMock, return_value="translated text")
+    async def test_reply_uses_mention_author_false(self, mock_translate: AsyncMock) -> None:
         """Replies should not ping the original author."""
-        mock_instance = MagicMock()
-        mock_instance.translate.return_value = "translated text"
-        mock_translator_cls.return_value = mock_instance
-
         bot = _make_mock_bot()
         cog = TranslateCog(bot)
         ref = _make_reply_reference()

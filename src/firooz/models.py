@@ -70,6 +70,27 @@ class BannedTrack(Base):
     )
 
 
+class Poem(Base):
+    __tablename__ = "poems"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    poet: Mapped[str] = mapped_column(String, nullable=False)
+    book_title: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    poem_title: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class SharedPoem(Base):
+    __tablename__ = "shared_poems"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    poem_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    shared_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+
 class Karma(Base):
     __tablename__ = "karma"
 
