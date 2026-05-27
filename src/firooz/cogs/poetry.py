@@ -11,6 +11,7 @@ from firooz.ollama import translate_to_english
 
 logger = logging.getLogger("firooz.poetry")
 
+DISCORD_MAX_LEN = 2000
 BOT_ZONE_CHANNEL = "bot_zone"
 
 # Config keys stored in the config table
@@ -32,6 +33,33 @@ def _format_poem(poet: str, book_title: str, poem_title: str, text: str) -> str:
     if poem_title:
         header += f" — {poem_title}"
     return f"{header}\n\n{text}"
+
+
+def _split_message(text: str, limit: int = DISCORD_MAX_LEN) -> list[str]:
+    """Split text into chunks that fit within Discord's message limit.
+
+    Splits on newlines first, then hard-wraps if a single line is too long.
+    """
+    if len(text) <= limit:
+        return [text]
+
+    chunks: list[str] = []
+    current = ""
+    for line in text.split("\n"):
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) <= limit:
+            current = candidate
+        else:
+            if current:
+                chunks.append(current)
+            # If a single line exceeds the limit, hard-split it
+            while len(line) > limit:
+                chunks.append(line[:limit])
+                line = line[limit:]
+            current = line
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 
@@ -65,11 +93,21 @@ class PoetryCog(commands.Cog, name="Poetry"):
             return False
 
         msg = _format_poem(poem.poet, poem.book_title, poem.poem_title, poem.text)
-        translation = await translate_to_english(poem.text)
-        if translation:
-            msg += f"\n\n**Translation:**\n{translation}"
+        header_parts = [poem.poet, poem.book_title, poem.poem_title]
+        header_text = " — ".join(p for p in header_parts if p)
+        full_text = f"{header_text}\n\n{poem.text}"
 
-        await channel.send(msg)
+        async with channel.typing():
+            translation = await translate_to_english(full_text)
+
+        if translation:
+            full = f"{msg}\n\n**Translation:**\n{translation}"
+        else:
+            full = msg
+
+        for chunk in _split_message(full):
+            await channel.send(chunk)
+
         await self.db.record_shared_poem(guild.id, poem.id)
         return True
 
@@ -99,11 +137,39 @@ class PoetryCog(commands.Cog, name="Poetry"):
     async def before_poem_loop(self) -> None:
         await self.bot.wait_until_ready()
 
+    async def _replay_last_poem(self, guild: discord.Guild, channel: discord.abc.Messageable) -> bool:
+        """Re-post the last shared poem with a fresh translation."""
+        poem = await self.db.get_last_shared_poem(guild.id)
+        if poem is None:
+            return False
+
+        msg = _format_poem(poem.poet, poem.book_title, poem.poem_title, poem.text)
+        header_parts = [poem.poet, poem.book_title, poem.poem_title]
+        header_text = " — ".join(p for p in header_parts if p)
+        full_text = f"{header_text}\n\n{poem.text}"
+
+        async with channel.typing():
+            translation = await translate_to_english(full_text)
+
+        if translation:
+            full = f"{msg}\n\n**Translation:**\n{translation}"
+        else:
+            full = msg
+
+        for chunk in _split_message(full):
+            await channel.send(chunk)
+        return True
+
     @commands.command(name="poem", aliases=["faal"])  # type: ignore[arg-type]
-    async def poem(self, ctx: commands.Context[commands.Bot]) -> None:
-        """Get a random Persian poem (Hafez, Rumi, Saadi)."""
+    async def poem(self, ctx: commands.Context[commands.Bot], arg: str = "") -> None:
+        """Get a random Persian poem. Use !poem last to replay the previous one."""
         if ctx.guild is None:
             await ctx.send("This command can only be used in a server.")
+            return
+
+        if arg.lower() == "last":
+            if not await self._replay_last_poem(ctx.guild, ctx):
+                await ctx.send("No previous poem found!")
             return
 
         if not await self._post_poem(ctx.guild, ctx):

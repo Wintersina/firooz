@@ -281,5 +281,17 @@ class KarmaDB:
             )
             return result.scalar_one_or_none()
 
+    async def get_last_shared_poem(self, guild_id: int) -> Poem | None:
+        """Get the most recently shared poem for a guild."""
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(Poem)
+                .join(SharedPoem, SharedPoem.poem_id == Poem.id)
+                .where(SharedPoem.guild_id == guild_id)
+                .order_by(SharedPoem.shared_at.desc())
+                .limit(1)
+            )
+            return result.scalar_one_or_none()
+
     async def close(self) -> None:
         pass

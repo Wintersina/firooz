@@ -22,7 +22,7 @@ check-ollama:
 	@curl -sf http://127.0.0.1:11434/ > /dev/null 2>&1 || \
 		(echo "Starting Ollama..."; ollama serve > /dev/null 2>&1 & sleep 2)
 	@echo "Ensuring qwen2.5:3b model is available..."
-	@ollama pull qwen2.5:3b
+	@ollama pull qwen2.5:7b
 	@echo "Ollama ready."
 
 run: $(VENV)/bin/activate check-ollama

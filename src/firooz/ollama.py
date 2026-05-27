@@ -7,7 +7,7 @@ import aiohttp
 logger = logging.getLogger("firooz.ollama")
 
 OLLAMA_URL = "http://127.0.0.1:11434"
-MODEL = "qwen2.5:3b"
+MODEL = "qwen2.5:7b"
 
 
 async def translate_to_english(text: str) -> str | None:
@@ -22,7 +22,7 @@ async def translate_to_english(text: str) -> str | None:
             async with session.post(
                 f"{OLLAMA_URL}/api/generate",
                 json={"model": MODEL, "stream": False, "prompt": prompt},
-                timeout=aiohttp.ClientTimeout(total=60),
+                timeout=aiohttp.ClientTimeout(total=300),
             ) as resp:
                 if resp.status != 200:
                     logger.error("Ollama returned status %d", resp.status)
@@ -46,7 +46,7 @@ async def translate(text: str, target: str = "English") -> str | None:
             async with session.post(
                 f"{OLLAMA_URL}/api/generate",
                 json={"model": MODEL, "stream": False, "prompt": prompt},
-                timeout=aiohttp.ClientTimeout(total=60),
+                timeout=aiohttp.ClientTimeout(total=300),
             ) as resp:
                 if resp.status != 200:
                     logger.error("Ollama returned status %d", resp.status)
