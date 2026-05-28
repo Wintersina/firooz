@@ -36,6 +36,8 @@ class HelpMeCog(commands.Cog, name="Help"):
                     aliases = f" ({', '.join(f'!{a}' for a in cmd.aliases)})"
                 desc = cmd.help or cmd.short_doc or "No description"
                 lines.append(f"`!{cmd.name}`{aliases} — {desc}")
+                if cmd.name == "poem":
+                    lines.append("`!poem last` — Replay the previous poem")
 
             embed.add_field(
                 name=f"{'─' * 2} {cog_name} {'─' * 2}",

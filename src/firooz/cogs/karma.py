@@ -17,6 +17,15 @@ logger = logging.getLogger("firooz.karma")
 
 BOT_ZONE_CHANNEL = "bot_zone"
 
+# Channel types that can host reaction-bearing messages.
+# Includes voice-channel text chat and threads so karma works there too.
+REACTABLE_CHANNEL_TYPES = (
+    discord.TextChannel,
+    discord.VoiceChannel,
+    discord.StageChannel,
+    discord.Thread,
+)
+
 
 def _describe_message(message: discord.Message) -> str:
     """Build a text description of a message: content, attachments, or embeds."""
@@ -120,7 +129,7 @@ class KarmaCog(commands.Cog, name="Karma"):
             return
 
         channel = self.bot.get_channel(payload.channel_id)
-        if not isinstance(channel, discord.TextChannel):
+        if not isinstance(channel, REACTABLE_CHANNEL_TYPES):
             return
         message = await channel.fetch_message(payload.message_id)
 
@@ -168,7 +177,7 @@ class KarmaCog(commands.Cog, name="Karma"):
             return
 
         channel = self.bot.get_channel(payload.channel_id)
-        if not isinstance(channel, discord.TextChannel):
+        if not isinstance(channel, REACTABLE_CHANNEL_TYPES):
             return
         message = await channel.fetch_message(payload.message_id)
 

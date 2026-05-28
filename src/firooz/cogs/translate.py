@@ -40,7 +40,8 @@ class TranslateCog(commands.Cog, name="Translate"):
             await ctx.send("Usage: reply to a message with `!tr` or use `!tr <text>`")
             return
 
-        translated = await translate(source_text, target="English")
+        async with ctx.channel.typing():
+            translated = await translate(source_text, target="English")
         if not translated:
             await ctx.send("Translation failed. Is Ollama running? (`ollama serve`)")
             return

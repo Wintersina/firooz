@@ -9,6 +9,7 @@ import discord
 import yt_dlp
 from discord.ext import commands
 
+from firooz import apple_music
 from firooz.database import KarmaDB
 
 logger = logging.getLogger("firooz.music")
@@ -31,6 +32,20 @@ FFMPEG_OPTIONS: dict[str, str] = {
 
 MAX_QUEUE_SIZE = 50
 MAX_MIX_SONGS = 50
+MAX_ALBUM_TRACKS = 25
+
+
+def _looks_like_url(value: str) -> bool:
+    v = value.strip()
+    return v.startswith("http://") or v.startswith("https://")
+
+
+async def _suppress_message_embeds(message: discord.Message) -> None:
+    """Best-effort: hide auto-embeds on a user's URL message to keep the channel tidy."""
+    try:
+        await message.edit(suppress=True)
+    except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+        pass
 
 
 @dataclass
@@ -213,9 +228,44 @@ class MusicCog(commands.Cog, name="Music"):
         await self._record_track(guild_id, track, queue.mix_query or "")
         logger.info("Mix auto-playing (%d/%d): %s [%s]", queue.mix_count, MAX_MIX_SONGS, track.title, track.url)
 
+    async def _enqueue_track(
+        self,
+        ctx: commands.Context[commands.Bot],
+        vc: discord.VoiceClient,
+        track: Track,
+        record_query: str,
+        announce: bool = True,
+    ) -> None:
+        """Either start playing `track` or append it to the queue."""
+        guild_id = ctx.guild.id  # type: ignore[union-attr]
+        queue = self._get_queue(guild_id)
+
+        if vc.is_playing() or vc.is_paused():
+            if len(queue.tracks) >= MAX_QUEUE_SIZE:
+                if announce:
+                    await ctx.send(f"Queue is full ({MAX_QUEUE_SIZE} tracks max).")
+                return
+            queue.tracks.append(track)
+            if announce:
+                await ctx.send(
+                    f"Added to queue: **{track.title}** [{track.duration}] "
+                    f"(#{len(queue.tracks)} in queue)",
+                    suppress_embeds=True,
+                )
+        else:
+            queue.current = track
+            source = discord.FFmpegPCMAudio(track.stream_url, **FFMPEG_OPTIONS)
+            vc.play(source, after=lambda e: self._play_next(guild_id))
+            if announce:
+                await ctx.send(
+                    f"Now playing: **{track.title}** [{track.duration}]",
+                    suppress_embeds=True,
+                )
+            await self._record_track(guild_id, track, record_query)
+
     @commands.command(name="play", aliases=["p"])  # type: ignore[arg-type]
     async def play(self, ctx: commands.Context[commands.Bot], *, query: str) -> None:
-        """Play a song from YouTube. Accepts a search query or URL."""
+        """Play a song. Accepts a search query, YouTube/SoundCloud URL, or Apple Music URL."""
         if ctx.author.voice is None or ctx.author.voice.channel is None:  # type: ignore[union-attr]
             await ctx.send("You need to be in a voice channel.")
             return
@@ -232,33 +282,70 @@ class MusicCog(commands.Cog, name="Music"):
             vc = ctx.voice_client
 
         assert isinstance(vc, discord.VoiceClient)
+        guild_id = ctx.guild.id  # type: ignore[union-attr]
 
-        await ctx.send(f"Searching for **{query}**...")
-        track = await self._search(query, guild_id=ctx.guild.id if ctx.guild else None)
+        if _looks_like_url(query):
+            await _suppress_message_embeds(ctx.message)
+
+        # Apple Music: resolve to title/artist via the iTunes lookup API, then
+        # let yt-dlp find the closest match on YouTube.
+        if apple_music.is_apple_music_url(query):
+            async with ctx.typing():
+                apple_tracks = await apple_music.resolve_url(query)
+            if not apple_tracks:
+                await ctx.send("Couldn't resolve that Apple Music URL.", suppress_embeds=True)
+                return
+            if len(apple_tracks) > 1:
+                await self._enqueue_apple_album(ctx, vc, apple_tracks)
+                return
+            query = apple_tracks[0].search_query
+
+        async with ctx.typing():
+            track = await self._search(query, guild_id=guild_id)
         if track is None:
-            await ctx.send("Couldn't find anything for that query.")
+            await ctx.send("Couldn't find anything for that query.", suppress_embeds=True)
             return
 
         track.requested_by = ctx.author.display_name
-        queue = self._get_queue(ctx.guild.id)  # type: ignore[union-attr]
-
-        if vc.is_playing() or vc.is_paused():
-            if len(queue.tracks) >= MAX_QUEUE_SIZE:
-                await ctx.send(f"Queue is full ({MAX_QUEUE_SIZE} tracks max).")
-                return
-            queue.tracks.append(track)
-            await ctx.send(
-                f"Added to queue: **{track.title}** [{track.duration}] "
-                f"(#{len(queue.tracks)} in queue)"
-            )
-        else:
-            queue.current = track
-            source = discord.FFmpegPCMAudio(track.stream_url, **FFMPEG_OPTIONS)
-            vc.play(source, after=lambda e: self._play_next(ctx.guild.id))  # type: ignore[union-attr]
-            await ctx.send(f"Now playing: **{track.title}** [{track.duration}]")
-            await self._record_track(ctx.guild.id, track, query)  # type: ignore[union-attr]
-
+        await self._enqueue_track(ctx, vc, track, query)
         logger.info("[#%s] %s queued: %s", ctx.channel, ctx.author, track.title)
+
+    async def _enqueue_apple_album(
+        self,
+        ctx: commands.Context[commands.Bot],
+        vc: discord.VoiceClient,
+        apple_tracks: list[apple_music.AppleTrack],
+    ) -> None:
+        guild_id = ctx.guild.id  # type: ignore[union-attr]
+        queue = self._get_queue(guild_id)
+        to_queue = apple_tracks[:MAX_ALBUM_TRACKS]
+        added = 0
+        first_title: str | None = None
+
+        async with ctx.typing():
+            for at in to_queue:
+                if len(queue.tracks) >= MAX_QUEUE_SIZE:
+                    break
+                search_query = at.search_query
+                track = await self._search(search_query, guild_id=guild_id)
+                if track is None:
+                    continue
+                track.requested_by = ctx.author.display_name
+                await self._enqueue_track(ctx, vc, track, search_query, announce=False)
+                added += 1
+                if first_title is None:
+                    first_title = track.title
+
+        if added == 0:
+            await ctx.send("Couldn't find any tracks from that album on YouTube.", suppress_embeds=True)
+            return
+
+        await ctx.send(
+            f"Added **{added}** track(s) from Apple Music album to the queue. "
+            f"Starting with **{first_title}**.",
+            suppress_embeds=True,
+        )
+        logger.info("[#%s] %s queued Apple Music album: %d tracks", ctx.channel, ctx.author, added)
 
     @commands.command(name="mix")  # type: ignore[arg-type]
     async def mix(self, ctx: commands.Context[commands.Bot], *, query: str) -> None:
