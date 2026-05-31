@@ -7,10 +7,27 @@ from discord.ext import commands
 
 from firooz.database import KarmaDB
 from firooz.karma import parse_karma_actions
+from firooz.ollama import interpret_reply, summarize_history
 from firooz.responses import (
     format_karma_response,
     format_leaderboard,
     format_self_vote_response,
+)
+
+HISTORY_REPLY_ACTIONS = [
+    {
+        "name": "summarize",
+        "description": (
+            "Answer a follow-up question about the karma history — e.g. "
+            "'what's the trend', 'why did X give them karma', 'show me "
+            "the negative ones', 'who gives them the most karma'."
+        ),
+        "params": '{"focus": "<the question or topic in plain words>"}',
+    },
+]
+
+LLM_UNAVAILABLE = (
+    "Couldn't reach the LLM. Is Ollama running? (`ollama serve`)"
 )
 
 logger = logging.getLogger("firooz.karma")
@@ -238,14 +255,130 @@ class KarmaCog(commands.Cog, name="Karma"):
             return
 
         lines = [f"**Karma history for {member.display_name}:**\n"]
+        structured: list[dict] = []
         for given_by_id, delta, reason, created_at in entries:
             giver = ctx.guild.get_member(given_by_id)
             giver_name = giver.display_name if giver else f"User {given_by_id}"
             sign = "+" if delta > 0 else ""
             reason_text = f" — *{reason}*" if reason else ""
             lines.append(f"`{created_at}` {sign}{delta} from {giver_name}{reason_text}")
+            structured.append({
+                "giver": giver_name,
+                "delta": delta,
+                "reason": reason,
+                "when": str(created_at),
+            })
 
-        await ctx.send("\n".join(lines))
+        sent = await ctx.send("\n".join(lines))
+        await self._save_history_context(
+            sent, ctx, target_id=member.id,
+            target_name=member.display_name, entries=structured,
+        )
+
+    async def _save_history_context(
+        self,
+        sent: discord.Message,
+        ctx: commands.Context[commands.Bot],
+        target_id: int,
+        target_name: str,
+        entries: list[dict],
+    ) -> None:
+        if ctx.guild is None:
+            return
+        payload = {
+            "target_id": target_id,
+            "target_name": target_name,
+            "entries": entries,
+        }
+        try:
+            await self.bot.db.save_reply_context(  # type: ignore[attr-defined]
+                bot_message_id=sent.id,
+                channel_id=sent.channel.id,
+                guild_id=ctx.guild.id,
+                cog="Karma",
+                command="history",
+                payload=payload,
+            )
+        except Exception:
+            logger.exception("Failed to save history reply context")
+
+    @commands.Cog.listener()
+    async def on_firooz_reply(
+        self, message: discord.Message, context: dict
+    ) -> None:
+        if context.get("cog") != "Karma":
+            return
+
+        payload = context.get("payload") or {}
+        target_name = str(payload.get("target_name") or "?")
+        entries = payload.get("entries") or []
+
+        context_summary = (
+            f"Command: !history {target_name}\n"
+            f"Entries shown: {len(entries)}"
+        )
+
+        async with message.channel.typing():
+            intent = await interpret_reply(
+                reply_text=message.content,
+                context_summary=context_summary,
+                actions=HISTORY_REPLY_ACTIONS,
+            )
+
+        if intent is None:
+            await message.reply(LLM_UNAVAILABLE)
+            return
+
+        action = intent.get("action", "none")
+        if action == "none":
+            logger.info(
+                "[#%s] History reply ignored — no clear intent (%s)",
+                message.channel, intent.get("reason", ""),
+            )
+            return
+        if action != "summarize":
+            return
+
+        focus = str((intent.get("params") or {}).get("focus") or message.content).strip()
+
+        async with message.channel.typing():
+            result = await summarize_history(entries, target_name, focus)
+
+        if result is None:
+            await message.reply(LLM_UNAVAILABLE)
+            return
+
+        explanation = result.get("explanation") or ""
+        examples = result.get("examples") or []
+
+        lines = [f"🔎 **{focus[:120]}** — _{target_name}_"]
+        if explanation:
+            lines.append(f"> {explanation}")
+        if examples:
+            lines.append("")
+            for ex in examples[:8]:
+                sign = "+" if ex.get("delta", 0) > 0 else ""
+                lines.append(
+                    f"• {sign}{ex.get('delta', 0)} from **{ex['giver']}**: {ex['reason']}"
+                )
+                if ex.get("translation"):
+                    lines.append(f"   ↳ _{ex['translation']}_")
+        elif not explanation:
+            lines.append("_(no clear matches found)_")
+
+        reply_msg = await message.reply("\n".join(lines)[:1990])
+
+        try:
+            await self.bot.db.save_reply_context(  # type: ignore[attr-defined]
+                bot_message_id=reply_msg.id,
+                channel_id=reply_msg.channel.id,
+                guild_id=message.guild.id if message.guild else 0,
+                cog="Karma",
+                command="history",
+                payload=payload,
+            )
+        except Exception:
+            logger.exception("Failed to save history follow-up reply context")
 
 
 async def setup(bot: commands.Bot) -> None:

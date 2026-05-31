@@ -6,6 +6,23 @@ import discord
 from discord.ext import commands
 
 from firooz.database import KarmaDB
+from firooz.ollama import interpret_reply, query_memories
+
+MEMORIES_REPLY_ACTIONS = [
+    {
+        "name": "query",
+        "description": (
+            "Answer a follow-up about saved memories — e.g. 'find ones "
+            "about wifi', 'which look like passwords', 'translate this', "
+            "'what does this mean'."
+        ),
+        "params": '{"focus": "<the question or topic in plain words>"}',
+    },
+]
+
+LLM_UNAVAILABLE = (
+    "Couldn't reach the LLM. Is Ollama running? (`ollama serve`)"
+)
 
 logger = logging.getLogger("firooz.remember")
 
@@ -24,10 +41,12 @@ class RememberCog(commands.Cog, name="Remember"):
         self.bot = bot
         self.db = db
 
-    async def _send(self, guild: discord.Guild, msg: str, fallback: discord.abc.Messageable) -> None:
+    async def _send(
+        self, guild: discord.Guild, msg: str, fallback: discord.abc.Messageable
+    ) -> discord.Message:
         bot_zone = _find_bot_zone(guild)
         target = bot_zone or fallback
-        await target.send(msg)
+        return await target.send(msg)
 
     @commands.command(name="remember", aliases=["rem"])  # type: ignore[arg-type]
     async def remember(self, ctx: commands.Context[commands.Bot], key: str | None = None, *, value: str | None = None) -> None:
@@ -87,8 +106,12 @@ class RememberCog(commands.Cog, name="Remember"):
         value = await self.db.get_memory(ctx.guild.id, key)
         if value is None:
             await self._send(ctx.guild, f"I don't have anything saved for **{key}**.", ctx)
-        else:
-            await self._send(ctx.guild, f"**{key}** = {value}", ctx)
+            return
+        sent = await self._send(ctx.guild, f"**{key}** = {value}", ctx)
+        await self._save_memories_context(
+            sent, ctx, command="recall",
+            memories=[{"key": key, "value": value, "when": ""}],
+        )
 
     @commands.command(name="memories", aliases=["mems"])  # type: ignore[arg-type]
     async def memories(self, ctx: commands.Context[commands.Bot]) -> None:
@@ -105,7 +128,114 @@ class RememberCog(commands.Cog, name="Remember"):
         lines = ["**Saved memories:**\n"]
         for key, value, created_at in entries:
             lines.append(f"**{key}** — {value}")
-        await self._send(ctx.guild, "\n".join(lines), ctx)
+        sent = await self._send(ctx.guild, "\n".join(lines), ctx)
+        await self._save_memories_context(
+            sent, ctx, command="memories",
+            memories=[
+                {"key": k, "value": v, "when": str(c)}
+                for k, v, c in entries
+            ],
+        )
+
+    async def _save_memories_context(
+        self,
+        sent: discord.Message,
+        ctx: commands.Context[commands.Bot],
+        command: str,
+        memories: list[dict],
+    ) -> None:
+        if ctx.guild is None:
+            return
+        payload = {"memories": memories, "kind": command}
+        try:
+            await self.bot.db.save_reply_context(  # type: ignore[attr-defined]
+                bot_message_id=sent.id,
+                channel_id=sent.channel.id,
+                guild_id=ctx.guild.id,
+                cog="Remember",
+                command=command,
+                payload=payload,
+            )
+        except Exception:
+            logger.exception("Failed to save memories reply context")
+
+    @commands.Cog.listener()
+    async def on_firooz_reply(
+        self, message: discord.Message, context: dict
+    ) -> None:
+        if context.get("cog") != "Remember":
+            return
+
+        payload = context.get("payload") or {}
+        memories = payload.get("memories") or []
+        kind = payload.get("kind") or "memories"
+
+        if not memories:
+            return
+
+        context_summary = (
+            f"Command: !{kind}\n"
+            f"Memories shown: {len(memories)}"
+        )
+
+        async with message.channel.typing():
+            intent = await interpret_reply(
+                reply_text=message.content,
+                context_summary=context_summary,
+                actions=MEMORIES_REPLY_ACTIONS,
+            )
+
+        if intent is None:
+            await message.reply(LLM_UNAVAILABLE)
+            return
+
+        action = intent.get("action", "none")
+        if action == "none":
+            logger.info(
+                "[#%s] Memories reply ignored — no clear intent (%s)",
+                message.channel, intent.get("reason", ""),
+            )
+            return
+        if action != "query":
+            return
+
+        focus = str((intent.get("params") or {}).get("focus") or message.content).strip()
+
+        async with message.channel.typing():
+            result = await query_memories(memories, focus)
+
+        if result is None:
+            await message.reply(LLM_UNAVAILABLE)
+            return
+
+        explanation = result.get("explanation") or ""
+        matches = result.get("matches") or []
+
+        lines = [f"🔎 **{focus[:120]}**"]
+        if explanation:
+            lines.append(f"> {explanation}")
+        if matches:
+            lines.append("")
+            for m in matches[:10]:
+                lines.append(f"• **{m['key']}** = {m['value']}")
+                if m.get("translation"):
+                    lines.append(f"   ↳ _{m['translation']}_")
+        elif not explanation:
+            lines.append("_(no clear matches found)_")
+
+        reply_msg = await message.reply("\n".join(lines)[:1990])
+
+        try:
+            await self.bot.db.save_reply_context(  # type: ignore[attr-defined]
+                bot_message_id=reply_msg.id,
+                channel_id=reply_msg.channel.id,
+                guild_id=message.guild.id if message.guild else 0,
+                cog="Remember",
+                command=kind,
+                payload=payload,
+            )
+        except Exception:
+            logger.exception("Failed to save memories follow-up reply context")
 
     @commands.command(name="forget")  # type: ignore[arg-type]
     async def forget(self, ctx: commands.Context[commands.Bot], key: str) -> None:

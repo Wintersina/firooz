@@ -81,7 +81,7 @@ class HelpMeCog(commands.Cog, name="Help"):
                 inline=False,
             )
 
-        embed.set_footer(text="Firooz Bot")
+        embed.set_footer(text="Firooz Bot · Tag @Firooz to chat or ask in plain English")
         await ctx.send(embed=embed)
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
@@ -9,13 +10,17 @@ from firooz.models import (
     Base,
     BannedTrack,
     Config,
+    ImageCaption,
     Karma,
     KarmaLog,
     Memory,
     PlayedTrack,
     Poem,
+    ReplyContext,
     SharedPoem,
 )
+
+MAX_REPLY_CONTEXT_BYTES = 100 * 1024 * 1024  # 100 MB cap; oldest rows are evicted past this.
 
 
 class KarmaDB:
@@ -292,6 +297,112 @@ class KarmaDB:
                 .limit(1)
             )
             return result.scalar_one_or_none()
+
+    async def save_reply_context(
+        self,
+        bot_message_id: int,
+        channel_id: int,
+        guild_id: int,
+        cog: str,
+        command: str,
+        payload: dict,
+    ) -> None:
+        payload_str = json.dumps(payload)
+        async with self._session_factory() as session:
+            existing = await session.get(ReplyContext, bot_message_id)
+            if existing is None:
+                session.add(ReplyContext(
+                    bot_message_id=bot_message_id,
+                    channel_id=channel_id,
+                    guild_id=guild_id,
+                    cog=cog,
+                    command=command,
+                    payload=payload_str,
+                ))
+            else:
+                existing.cog = cog
+                existing.command = command
+                existing.payload = payload_str
+            await session.commit()
+        await self._enforce_reply_context_cap()
+
+    async def get_reply_context(self, bot_message_id: int) -> dict | None:
+        """Return {cog, command, payload, ...} or None if missing/corrupt."""
+        async with self._session_factory() as session:
+            row = await session.get(ReplyContext, bot_message_id)
+            if row is None:
+                return None
+            try:
+                payload = json.loads(row.payload)
+            except json.JSONDecodeError:
+                return None
+            return {
+                "cog": row.cog,
+                "command": row.command,
+                "payload": payload,
+                "created_at": row.created_at,
+                "channel_id": row.channel_id,
+                "guild_id": row.guild_id,
+            }
+
+    async def _enforce_reply_context_cap(self) -> int:
+        """Delete oldest reply contexts until total payload size is under the cap.
+        Returns the number of rows evicted."""
+        async with self._session_factory() as session:
+            total_result = await session.execute(
+                select(func.coalesce(func.sum(func.length(ReplyContext.payload)), 0))
+            )
+            total = int(total_result.scalar() or 0)
+            if total <= MAX_REPLY_CONTEXT_BYTES:
+                return 0
+
+            result = await session.execute(
+                select(ReplyContext).order_by(ReplyContext.created_at.asc())
+            )
+            evicted = 0
+            for row in result.scalars():
+                if total <= MAX_REPLY_CONTEXT_BYTES:
+                    break
+                total -= len(row.payload)
+                await session.delete(row)
+                evicted += 1
+            await session.commit()
+            return evicted
+
+    async def save_image_caption(
+        self,
+        attachment_id: int,
+        message_id: int,
+        content_type: str,
+        caption: str,
+    ) -> None:
+        async with self._session_factory() as session:
+            existing = await session.get(ImageCaption, attachment_id)
+            if existing is None:
+                session.add(ImageCaption(
+                    attachment_id=attachment_id,
+                    message_id=message_id,
+                    content_type=content_type or "",
+                    caption=caption,
+                ))
+            else:
+                existing.caption = caption
+                existing.content_type = content_type or existing.content_type
+                existing.message_id = message_id
+            await session.commit()
+
+    async def get_image_captions(
+        self, attachment_ids: list[int]
+    ) -> dict[int, str]:
+        """Bulk lookup: {attachment_id: caption} for the ones we have."""
+        if not attachment_ids:
+            return {}
+        async with self._session_factory() as session:
+            result = await session.execute(
+                select(ImageCaption.attachment_id, ImageCaption.caption)
+                .where(ImageCaption.attachment_id.in_(attachment_ids))
+            )
+            return {row[0]: row[1] for row in result.all()}
 
     async def close(self) -> None:
         pass

@@ -100,3 +100,31 @@ class Karma(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now(), onupdate=func.now()
     )
+
+
+class ReplyContext(Base):
+    __tablename__ = "reply_contexts"
+
+    bot_message_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    channel_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    guild_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cog: Mapped[str] = mapped_column(String, nullable=False)
+    command: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )
+
+
+class ImageCaption(Base):
+    __tablename__ = "image_captions"
+
+    # Discord attachment_id is a stable snowflake — unlike CDN URLs which
+    # carry expiring signatures and rotate.
+    attachment_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    content_type: Mapped[str] = mapped_column(String, nullable=False, default="")
+    caption: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now()
+    )

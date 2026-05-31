@@ -22,6 +22,7 @@ COGS: list[str] = [
     "firooz.cogs.translate",
     "firooz.cogs.poetry",
     "firooz.cogs.timer",
+    "firooz.cogs.ask",
     "firooz.cogs.helpme",
 ]
 
@@ -75,6 +76,44 @@ def create_bot(config: Config, db: KarmaDB) -> commands.Bot:
         logger.info("Loaded cogs: %s", ", ".join(bot.cogs.keys()))
         logger.info("Rate limit: %d requests per %ds per user", RATE_LIMIT_MAX, RATE_LIMIT_WINDOW)
 
+    async def _maybe_dispatch_reply(message: discord.Message) -> bool:
+        """If this message is a reply to a tracked Firooz message, dispatch
+        a firooz_reply event and return True. Otherwise return False."""
+        ref = message.reference
+        if ref is None or ref.message_id is None:
+            return False
+
+        # Cheap pre-filter: only fetch if the referenced author is our bot.
+        # message.reference.resolved is populated when the referenced message
+        # is in cache; otherwise we fetch.
+        resolved = ref.resolved if isinstance(ref.resolved, discord.Message) else None
+        if resolved is None:
+            try:
+                resolved = await message.channel.fetch_message(ref.message_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return False
+        if bot.user is None or resolved.author.id != bot.user.id:
+            return False
+
+        context = await db.get_reply_context(ref.message_id)
+        if context is None:
+            return False
+
+        if rate_limiter.is_limited(message.author.id):
+            await message.channel.send(
+                f"**{message.author.display_name}**, slow down! "
+                f"Max {RATE_LIMIT_MAX} requests per {RATE_LIMIT_WINDOW}s."
+            )
+            return True
+
+        logger.info(
+            "[#%s] Reply by %s to %s/%s (msg %d)",
+            message.channel, message.author,
+            context["cog"], context["command"], ref.message_id,
+        )
+        bot.dispatch("firooz_reply", message, context)
+        return True
+
     @bot.event
     async def on_message(message: discord.Message) -> None:
         if message.author.bot or message.guild is None:
@@ -89,10 +128,19 @@ def create_bot(config: Config, db: KarmaDB) -> commands.Bot:
             )
         logger.info("[#%s] %s: %s", message.channel, message.author, display_content)
 
-        # Check rate limit for commands and karma actions
+        # Replies to tracked Firooz messages get routed through the LLM
+        # intent system instead of normal command handling.
+        if await _maybe_dispatch_reply(message):
+            return
+
+        # Check rate limit for commands, karma actions, and explicit bot mentions.
         is_command = message.content.startswith("!")
         has_karma = "++" in message.content or "--" in message.content
-        if is_command or has_karma:
+        is_explicit_mention = bot.user is not None and (
+            f"<@{bot.user.id}>" in message.content
+            or f"<@!{bot.user.id}>" in message.content
+        )
+        if is_command or has_karma or is_explicit_mention:
             if rate_limiter.is_limited(message.author.id):
                 remaining_wait = int(RATE_LIMIT_WINDOW)
                 await message.channel.send(
