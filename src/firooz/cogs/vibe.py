@@ -100,7 +100,7 @@ class VibeCog(commands.Cog, name="Vibe"):
         self.bot = bot
 
     async def _collect(self, ctx: commands.Context[commands.Bot], count: int) -> list[discord.Message]:
-        count = max(10, min(count, 100))
+        count = max(1, min(count, 100))
         # Bot messages and bot-command invocations carry no emotional
         # signal, so they get skipped. Image-only messages (no text but
         # with image attachments) are kept — they'll get captioned later.
@@ -224,8 +224,8 @@ class VibeCog(commands.Cog, name="Vibe"):
             return
 
         messages = await self._collect(ctx, count)
-        if len(messages) < 5:
-            await ctx.send("Not enough messages to check the vibe.")
+        if not messages:
+            await ctx.send("No messages to check the vibe on yet.")
             return
 
         async with ctx.typing():
@@ -265,8 +265,8 @@ class VibeCog(commands.Cog, name="Vibe"):
             return
 
         messages = await self._collect(ctx, count)
-        if len(messages) < 5:
-            await ctx.send("Not enough messages to check the vibe.")
+        if not messages:
+            await ctx.send("No messages to check the vibe on yet.")
             return
 
         async with ctx.typing():
