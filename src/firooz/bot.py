@@ -21,6 +21,7 @@ COGS: list[str] = [
     "firooz.cogs.music",
     "firooz.cogs.translate",
     "firooz.cogs.poetry",
+    "firooz.cogs.timer",
     "firooz.cogs.helpme",
 ]
 

@@ -4,7 +4,8 @@ import logging
 
 import discord
 from discord.ext import commands
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+
+from firooz.ollama import analyze_vibe, analyze_vibe_breakdown
 
 logger = logging.getLogger("firooz.vibe")
 
@@ -19,6 +20,10 @@ VIBE_LEVELS: list[tuple[float, str, str]] = [
     (1.1,  "off the charts wholesome", "\U0001f31f\U0001f31f\U0001f31f\U0001f31f\U0001f31f"),
 ]
 
+LLM_UNAVAILABLE = (
+    "Couldn't read the vibe — the LLM didn't respond. Is Ollama running? (`ollama serve`)"
+)
+
 
 def get_vibe_label(score: float) -> tuple[str, str]:
     for threshold, label, emojis in VIBE_LEVELS:
@@ -27,45 +32,142 @@ def get_vibe_label(score: float) -> tuple[str, str]:
     return VIBE_LEVELS[-1][1], VIBE_LEVELS[-1][2]
 
 
+def _person_arrow(score: float) -> str:
+    if score > 0.1:
+        return "⬆️"
+    if score < -0.1:
+        return "⬇️"
+    return "➡️"
+
+
 class VibeCog(commands.Cog, name="Vibe"):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self.analyzer = SentimentIntensityAnalyzer()
 
-    @commands.command(name="vibe", aliases=["v"])  # type: ignore[arg-type]
+    async def _collect(self, ctx: commands.Context[commands.Bot], count: int) -> list[discord.Message]:
+        count = max(10, min(count, 100))
+        # Bot messages, empty content, and bot-command invocations (which
+        # carry no emotional signal) get filtered out, so scan a wider window
+        # until we hit `count` real user messages (or exhaust the cap).
+        scan_cap = max(count * 4, 200)
+        messages: list[discord.Message] = []
+        async for msg in ctx.channel.history(limit=scan_cap):
+            if msg.author.bot or not msg.content:
+                continue
+            if msg.content.startswith("!"):
+                continue
+            messages.append(msg)
+            if len(messages) >= count:
+                break
+        return messages
+
+    @commands.group(name="vibe", aliases=["v"], invoke_without_command=True)  # type: ignore[arg-type]
     async def vibe(self, ctx: commands.Context[commands.Bot], count: int = 50) -> None:
-        """Check the vibe of the channel. Optional: !vibe 100 (10-100 messages)"""
+        """Check the vibe of the channel via LLM. Usage: !vibe [10-100]"""
         if ctx.guild is None:
             await ctx.send("This command can only be used in a server.")
             return
 
-        count = max(10, min(count, 100))
-
-        messages: list[discord.Message] = []
-        async for msg in ctx.channel.history(limit=count):
-            if not msg.author.bot and msg.content:
-                messages.append(msg)
-
+        messages = await self._collect(ctx, count)
         if len(messages) < 5:
             await ctx.send("Not enough messages to check the vibe.")
             return
 
-        scores: list[float] = []
-        for msg in messages:
-            sentiment = self.analyzer.polarity_scores(msg.content)
-            scores.append(sentiment["compound"])
+        async with ctx.typing():
+            result = await analyze_vibe([m.content for m in messages])
 
-        avg_score = sum(scores) / len(scores)
-        label, emojis = get_vibe_label(avg_score)
+        if result is None:
+            await ctx.send(LLM_UNAVAILABLE)
+            return
 
-        response = (
-            f"{emojis} **Vibe Check** {emojis}\n"
-            f"The energy in here is **{label}** ({avg_score:+.2f})\n"
-            f"Based on the last {len(messages)} messages"
+        score, summary = result
+        label, emojis = get_vibe_label(score)
+        lines = [
+            f"{emojis} **Vibe Check** {emojis}",
+            f"The energy in here is **{label}** ({score:+.2f})",
+        ]
+        if summary:
+            lines.append(f"> _{summary}_")
+        lines.append(f"Based on the last {len(messages)} messages")
+        await ctx.send("\n".join(lines))
+        logger.info(
+            "[#%s] Vibe check: %s (%.2f) from %d msgs",
+            ctx.channel, label, score, len(messages),
         )
-        await ctx.send(response)
-        logger.info("[#%s] Vibe check: %s (%.2f) from %d messages",
-                     ctx.channel, label, avg_score, len(messages))
+
+    @vibe.command(name="breakdown", aliases=["bd", "who"])  # type: ignore[arg-type]
+    async def vibe_breakdown(self, ctx: commands.Context[commands.Bot], count: int = 50) -> None:
+        """Per-person vibe breakdown via LLM. Usage: !vibe breakdown [10-100]"""
+        if ctx.guild is None:
+            await ctx.send("This command can only be used in a server.")
+            return
+
+        messages = await self._collect(ctx, count)
+        if len(messages) < 5:
+            await ctx.send("Not enough messages to check the vibe.")
+            return
+
+        grouped: dict[str, list[str]] = {}
+        for msg in messages:
+            grouped.setdefault(msg.author.display_name, []).append(msg.content)
+
+        async with ctx.typing():
+            data = await analyze_vibe_breakdown(grouped)
+
+        if data is None:
+            await ctx.send(LLM_UNAVAILABLE)
+            return
+
+        overall = float(data.get("score", 0.0))
+        summary = str(data.get("summary") or "").strip()
+        raw_people = data.get("people") or []
+
+        people: list[tuple[str, float, str]] = []
+        for p in raw_people:
+            if not isinstance(p, dict):
+                continue
+            try:
+                p_score = max(-1.0, min(1.0, float(p.get("score", 0.0))))
+            except (TypeError, ValueError):
+                continue
+            name = str(p.get("name") or "?").strip()
+            note = str(p.get("note") or "").strip()
+            people.append((name, p_score, note))
+
+        people.sort(key=lambda t: t[1], reverse=True)
+        label, emojis = get_vibe_label(overall)
+        lines = [
+            f"{emojis} **Vibe Breakdown** {emojis}",
+            f"Overall: **{label}** ({overall:+.2f})",
+        ]
+        if summary:
+            lines.append(f"> _{summary}_")
+
+        positive = [p for p in people if p[1] > 0.1]
+        chill = [p for p in people if -0.1 <= p[1] <= 0.1]
+        negative = [p for p in people if p[1] < -0.1]
+
+        if positive:
+            lines.append("\n**Bringing the energy:**")
+            for name, sc, note in positive:
+                tail = f" — {note}" if note else ""
+                lines.append(f"{_person_arrow(sc)} **{name}** ({sc:+.2f}){tail}")
+        if chill:
+            lines.append("\n**Just chillin':**")
+            for name, sc, _ in chill:
+                lines.append(f"{_person_arrow(sc)} **{name}** ({sc:+.2f})")
+        if negative:
+            lines.append("\n**Bringing it down:**")
+            for name, sc, note in negative:
+                tail = f" — {note}" if note else ""
+                lines.append(f"{_person_arrow(sc)} **{name}** ({sc:+.2f}){tail}")
+
+        lines.append(f"\nBased on the last {len(messages)} messages")
+        await ctx.send("\n".join(lines)[:1990])
+        logger.info(
+            "[#%s] Vibe breakdown: %s (%.2f), %d people",
+            ctx.channel, label, overall, len(people),
+        )
 
 
 async def setup(bot: commands.Bot) -> None:

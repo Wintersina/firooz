@@ -33,6 +33,8 @@ FFMPEG_OPTIONS: dict[str, str] = {
 MAX_QUEUE_SIZE = 50
 MAX_MIX_SONGS = 50
 MAX_ALBUM_TRACKS = 25
+BOT_ZONE_CHANNEL = "bot_zone"
+IDLE_LEAVE_SECONDS = 30
 
 
 def _looks_like_url(value: str) -> bool:
@@ -74,11 +76,71 @@ class MusicCog(commands.Cog, name="Music"):
         self.bot = bot
         self.db = db
         self.queues: dict[int, GuildQueue] = {}
+        self._idle_tasks: dict[int, asyncio.Task[None]] = {}
 
     def _get_queue(self, guild_id: int) -> GuildQueue:
         if guild_id not in self.queues:
             self.queues[guild_id] = GuildQueue()
         return self.queues[guild_id]
+
+    def _find_bot_zone(self, guild_id: int) -> discord.TextChannel | None:
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            return None
+        for channel in guild.text_channels:
+            if channel.name == BOT_ZONE_CHANNEL:
+                return channel
+        return None
+
+    def _cancel_idle_timer(self, guild_id: int) -> None:
+        task = self._idle_tasks.pop(guild_id, None)
+        if task and not task.done():
+            task.cancel()
+
+    def _start_idle_timer(self, guild_id: int) -> None:
+        self._cancel_idle_timer(guild_id)
+        self._idle_tasks[guild_id] = asyncio.create_task(self._idle_disconnect(guild_id))
+
+    async def _idle_disconnect(self, guild_id: int) -> None:
+        try:
+            await asyncio.sleep(IDLE_LEAVE_SECONDS)
+        except asyncio.CancelledError:
+            return
+
+        guild = self.bot.get_guild(guild_id)
+        vc = guild.voice_client if guild else None
+        if not isinstance(vc, discord.VoiceClient):
+            self._idle_tasks.pop(guild_id, None)
+            return
+        if any(not m.bot for m in vc.channel.members):
+            self._idle_tasks.pop(guild_id, None)
+            return
+
+        gq = self._get_queue(guild_id)
+        gq.tracks.clear()
+        gq.current = None
+        gq.loop = False
+        gq.mix_query = None
+        gq.mix_count = 0
+        gq.played_urls.clear()
+        if vc.is_playing() or vc.is_paused():
+            vc.stop()
+        await vc.disconnect()
+        self._idle_tasks.pop(guild_id, None)
+        logger.info("Auto-left voice in guild %d after %ds idle", guild_id, IDLE_LEAVE_SECONDS)
+
+    async def _announce_now_playing(self, guild_id: int, track: Track) -> None:
+        """Post a 'Now playing' update in #bot_zone for auto-advanced tracks."""
+        channel = self._find_bot_zone(guild_id)
+        if channel is None:
+            return
+        try:
+            await channel.send(
+                f"Now playing: **{track.title}** [{track.duration}]",
+                suppress_embeds=True,
+            )
+        except discord.HTTPException:
+            logger.exception("Failed to announce now playing in #%s", BOT_ZONE_CHANNEL)
 
     async def _record_track(self, guild_id: int, track: Track, query: str = "") -> None:
         """Record a track to DB so it won't repeat for a week."""
@@ -195,6 +257,9 @@ class MusicCog(commands.Cog, name="Music"):
         queue.current = track
         source = discord.FFmpegPCMAudio(track.stream_url, **FFMPEG_OPTIONS)
         vc.play(source, after=lambda e: self._play_next(guild_id))
+        asyncio.run_coroutine_threadsafe(
+            self._announce_now_playing(guild_id, track), self.bot.loop,
+        )
         logger.info("Now playing: %s", track.title)
 
     async def _mix_next(self, guild_id: int) -> None:
@@ -226,6 +291,7 @@ class MusicCog(commands.Cog, name="Music"):
         source = discord.FFmpegPCMAudio(track.stream_url, **FFMPEG_OPTIONS)
         vc.play(source, after=lambda e: self._play_next(guild_id))
         await self._record_track(guild_id, track, queue.mix_query or "")
+        await self._announce_now_playing(guild_id, track)
         logger.info("Mix auto-playing (%d/%d): %s [%s]", queue.mix_count, MAX_MIX_SONGS, track.title, track.url)
 
     async def _enqueue_track(
@@ -243,13 +309,17 @@ class MusicCog(commands.Cog, name="Music"):
         if vc.is_playing() or vc.is_paused():
             if len(queue.tracks) >= MAX_QUEUE_SIZE:
                 if announce:
-                    await ctx.send(f"Queue is full ({MAX_QUEUE_SIZE} tracks max).")
+                    await ctx.reply(
+                        f"Queue is full ({MAX_QUEUE_SIZE} tracks max).",
+                        mention_author=False,
+                    )
                 return
             queue.tracks.append(track)
             if announce:
-                await ctx.send(
+                await ctx.reply(
                     f"Added to queue: **{track.title}** [{track.duration}] "
                     f"(#{len(queue.tracks)} in queue)",
+                    mention_author=False,
                     suppress_embeds=True,
                 )
         else:
@@ -257,8 +327,9 @@ class MusicCog(commands.Cog, name="Music"):
             source = discord.FFmpegPCMAudio(track.stream_url, **FFMPEG_OPTIONS)
             vc.play(source, after=lambda e: self._play_next(guild_id))
             if announce:
-                await ctx.send(
+                await ctx.reply(
                     f"Now playing: **{track.title}** [{track.duration}]",
+                    mention_author=False,
                     suppress_embeds=True,
                 )
             await self._record_track(guild_id, track, record_query)
@@ -293,7 +364,11 @@ class MusicCog(commands.Cog, name="Music"):
             async with ctx.typing():
                 apple_tracks = await apple_music.resolve_url(query)
             if not apple_tracks:
-                await ctx.send("Couldn't resolve that Apple Music URL.", suppress_embeds=True)
+                await ctx.reply(
+                    "Couldn't resolve that Apple Music URL.",
+                    mention_author=False,
+                    suppress_embeds=True,
+                )
                 return
             if len(apple_tracks) > 1:
                 await self._enqueue_apple_album(ctx, vc, apple_tracks)
@@ -303,7 +378,11 @@ class MusicCog(commands.Cog, name="Music"):
         async with ctx.typing():
             track = await self._search(query, guild_id=guild_id)
         if track is None:
-            await ctx.send("Couldn't find anything for that query.", suppress_embeds=True)
+            await ctx.reply(
+                "Couldn't find anything for that query.",
+                mention_author=False,
+                suppress_embeds=True,
+            )
             return
 
         track.requested_by = ctx.author.display_name
@@ -337,12 +416,17 @@ class MusicCog(commands.Cog, name="Music"):
                     first_title = track.title
 
         if added == 0:
-            await ctx.send("Couldn't find any tracks from that album on YouTube.", suppress_embeds=True)
+            await ctx.reply(
+                "Couldn't find any tracks from that album on YouTube.",
+                mention_author=False,
+                suppress_embeds=True,
+            )
             return
 
-        await ctx.send(
+        await ctx.reply(
             f"Added **{added}** track(s) from Apple Music album to the queue. "
             f"Starting with **{first_title}**.",
+            mention_author=False,
             suppress_embeds=True,
         )
         logger.info("[#%s] %s queued Apple Music album: %d tracks", ctx.channel, ctx.author, added)
@@ -585,24 +669,40 @@ class MusicCog(commands.Cog, name="Music"):
         before: discord.VoiceState,
         after: discord.VoiceState,
     ) -> None:
-        """Resync audio when someone joins the bot's voice channel."""
-        if member.bot:
-            return
-
-        # Only care about someone joining the bot's channel
+        """Resync audio on join, and auto-disconnect after idle when alone."""
         guild = member.guild
         vc = guild.voice_client
-        if not isinstance(vc, discord.VoiceClient) or not vc.is_playing():
+
+        # Bot itself was disconnected/moved externally — clear any pending idle timer.
+        if self.bot.user and member.id == self.bot.user.id:
+            if after.channel is None:
+                self._cancel_idle_timer(guild.id)
             return
 
-        # Someone joined the channel the bot is in
-        if after.channel and after.channel == vc.channel and before.channel != after.channel:
-            # Wait for Discord to finish the voice state change
-            await asyncio.sleep(1.0)
-            vc.pause()
-            await asyncio.sleep(1.5)
-            vc.resume()
-            logger.info("Audio resync: %s joined voice channel", member.display_name)
+        if member.bot or not isinstance(vc, discord.VoiceClient):
+            return
+
+        bot_channel = vc.channel
+
+        # Someone joined the bot's channel
+        if after.channel == bot_channel and before.channel != bot_channel:
+            self._cancel_idle_timer(guild.id)
+            if vc.is_playing():
+                await asyncio.sleep(1.0)
+                vc.pause()
+                await asyncio.sleep(1.5)
+                vc.resume()
+                logger.info("Audio resync: %s joined voice channel", member.display_name)
+            return
+
+        # Someone left the bot's channel — start idle timer if no humans remain.
+        if before.channel == bot_channel and after.channel != bot_channel:
+            if not any(not m.bot for m in bot_channel.members):
+                self._start_idle_timer(guild.id)
+                logger.info(
+                    "Voice channel empty in guild %d — leaving in %ds",
+                    guild.id, IDLE_LEAVE_SECONDS,
+                )
 
 
 async def setup(bot: commands.Bot) -> None:
