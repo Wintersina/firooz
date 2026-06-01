@@ -105,29 +105,43 @@ async def translate(text: str, target: str = "English") -> str | None:
         return None
 
 
-async def analyze_vibe(messages: list[str]) -> tuple[float, str] | None:
+async def analyze_vibe(messages: list[str]) -> dict | None:
     """Score the overall vibe of a list of chat messages.
 
-    Returns (score in [-1.0, 1.0], one-line summary) or None on failure.
+    Returns {"score": float, "summary": str, "evidence": str,
+    "evidence_translation": str} or None on failure. Non-zero scores
+    without a verifiable verbatim quote from the source are forced to 0.0.
     """
     if not messages:
         return None
     sample = [m[:200] for m in messages[:80]]
+    source_normalized = _normalize_for_match(" ".join(sample))
+
     prompt = (
         "You are scoring the emotional vibe of a Discord chat. Messages may "
         "be English, Persian/Farsi, or mixed.\n\n"
-        "Scoring rules:\n"
-        "- Bot commands (starting with '!'), single words, greetings, and "
-        "neutral statements without clear emotion → score 0.0.\n"
-        "- Only assign positive scores when messages express genuine "
-        "enthusiasm, joy, kindness, hype, or wholesome connection.\n"
-        "- Only assign negative scores when messages express frustration, "
+        "CRITICAL RULES:\n"
+        "- For ANY non-zero score you assign, you MUST supply an 'evidence' "
+        "field containing a VERBATIM short quote (max 120 chars) from the "
+        "messages below. The quote must appear word-for-word in the source — "
+        "do NOT paraphrase, translate, or summarize.\n"
+        "- If you cannot find such a quote, the score MUST be 0.0, the "
+        "summary MUST be empty, and evidence MUST be empty.\n"
+        "- Bot commands ('!...'), single words, greetings, and neutral "
+        "statements have no emotional signal — score them 0.0.\n"
+        "- Positive scores are for genuine enthusiasm, joy, kindness, hype, "
+        "or wholesome connection. Negative scores are for frustration, "
         "anger, sadness, hostility, or toxicity.\n"
-        "- If unsure, score 0.0 — do NOT invent narratives.\n\n"
+        "- Do NOT invent narratives. If the messages don't clearly express "
+        "emotion, score them 0.0.\n\n"
         "Respond with a JSON object only:\n"
         '{"score": <number from -1.0 (toxic) to 1.0 (wholesome)>, '
-        '"summary": "<one short sentence describing the vibe, max 100 chars, '
-        'in English>"}\n\n'
+        '"summary": "<one short sentence in English, max 100 chars, or '
+        'empty string if score is 0.0>", '
+        '"evidence": "<verbatim quote from the messages, max 120 chars, or '
+        'empty string if score is 0.0>", '
+        '"evidence_translation": "<English translation of evidence if it '
+        'is NOT English, else empty string, max 120 chars>"}\n\n'
         "Messages:\n" + "\n".join(f"- {m}" for m in sample)
     )
     data = await _generate_json(prompt)
@@ -138,7 +152,29 @@ async def analyze_vibe(messages: list[str]) -> tuple[float, str] | None:
     except (TypeError, ValueError):
         return None
     summary = str(data.get("summary") or "").strip()[:200]
-    return score, summary
+    evidence = str(data.get("evidence") or "").strip()
+    evidence_tr = str(data.get("evidence_translation") or "").strip()
+
+    if abs(score) > 0.1:
+        quote_ok = bool(evidence) and (
+            _normalize_for_match(evidence) in source_normalized
+        )
+        if not quote_ok:
+            logger.info(
+                "vibe: dropping unsubstantiated score %.2f (evidence=%r)",
+                score, evidence[:80],
+            )
+            score = 0.0
+            summary = ""
+            evidence = ""
+            evidence_tr = ""
+
+    return {
+        "score": score,
+        "summary": summary,
+        "evidence": evidence,
+        "evidence_translation": evidence_tr,
+    }
 
 
 async def analyze_vibe_breakdown(grouped: dict[str, list[str]]) -> dict | None:

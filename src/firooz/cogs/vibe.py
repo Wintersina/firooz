@@ -47,8 +47,9 @@ VIBE_REPLY_ACTIONS = [
             "'what details supported that note'. Pick this for any "
             "question, complaint, or challenge about the breakdown."
         ),
-        "params": '{"focus": "<the question or topic in plain words>", '
-                  '"person": "<optional display name to filter to, or empty>"}',
+        "params": '{"focus": "<the user\'s message verbatim or near-verbatim '
+                  '— do NOT paraphrase into a topic>", '
+                  '"person": "<display name extracted from the question, or empty>"}',
     },
 ]
 
@@ -95,6 +96,23 @@ def _looks_like_question(text: str) -> bool:
     return any(t.startswith(s) for s in starters)
 
 
+def _is_score_meta_question(text: str) -> bool:
+    """True when the user seems to be asking about the score itself
+    (e.g. 'why is it neutral'), as opposed to asking for content
+    (e.g. 'show me toxic messages')."""
+    t = (text or "").lower()
+    if not t:
+        return False
+    asks = ("why", "how", "explain", "what does", "what makes", "tell me about")
+    score_words = (
+        "vibe", "score", "rating", "energy", "level",
+        "neutral", "hyped", "toxic", "wholesome",
+        "great energy", "good vibes", "kinda mid", "pretty rough",
+        "off the charts",
+    )
+    return any(a in t for a in asks) and any(s in t for s in score_words)
+
+
 class VibeCog(commands.Cog, name="Vibe"):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -104,9 +122,14 @@ class VibeCog(commands.Cog, name="Vibe"):
         # Bot messages and bot-command invocations carry no emotional
         # signal, so they get skipped. Image-only messages (no text but
         # with image attachments) are kept — they'll get captioned later.
+        # The triggering message itself ('@Firooz give me a vibe check')
+        # is also skipped so the request can't bias its own analysis.
         scan_cap = max(count * 4, 200)
+        trigger_id = ctx.message.id if ctx.message else None
         messages: list[discord.Message] = []
         async for msg in ctx.channel.history(limit=scan_cap):
+            if msg.id == trigger_id:
+                continue
             if msg.author.bot:
                 continue
             if msg.content.startswith("!"):
@@ -236,7 +259,10 @@ class VibeCog(commands.Cog, name="Vibe"):
             await ctx.send(LLM_UNAVAILABLE)
             return
 
-        score, summary = result
+        score = result["score"]
+        summary = result["summary"]
+        evidence = result["evidence"]
+        evidence_tr = result["evidence_translation"]
         label, emojis = get_vibe_label(score)
         lines = [
             f"{emojis} **Vibe Check** {emojis}",
@@ -244,11 +270,20 @@ class VibeCog(commands.Cog, name="Vibe"):
         ]
         if summary:
             lines.append(f"> _{summary}_")
+        if evidence:
+            lines.append(f"• {evidence}")
+            if evidence_tr:
+                lines.append(f"   ↳ _{evidence_tr}_")
         lines.append(f"Based on the last {len(messages)} messages")
         sent = await ctx.send("\n".join(lines))
         await self._save_context(
             sent, ctx, command="vibe",
-            overall={"score": score, "summary": summary},
+            overall={
+                "score": score,
+                "summary": summary,
+                "evidence": evidence,
+                "evidence_translation": evidence_tr,
+            },
             messages=messages,
             contents=contents,
         )
@@ -471,6 +506,14 @@ class VibeCog(commands.Cog, name="Vibe"):
             await self._reply_with_stored_evidence(message, target, payload)
             return
 
+        # Channel-level vibe (kind == "vibe") doesn't have per-person rows
+        # to drill into. If the user's asking about the score itself
+        # ("why is it neutral", "why hyped"), serve the stored overall
+        # evidence directly — no LLM call needed.
+        if payload.get("kind") == "vibe" and _is_score_meta_question(focus):
+            await self._reply_with_overall_summary(message, payload)
+            return
+
         # Broader question (no specific person) — fall through to drill_down.
         grouped: dict[str, list[str]] = {}
         for m in raw_messages:
@@ -536,6 +579,48 @@ class VibeCog(commands.Cog, name="Vibe"):
                 f"_{name}'s messages didn't carry clear emotion in the "
                 f"analyzed window — score is neutral._"
             )
+
+        reply_msg = await message.reply("\n".join(lines)[:1990])
+        await self._save_followup_context(reply_msg, message, payload)
+
+    async def _reply_with_overall_summary(
+        self, message: discord.Message, payload: dict,
+    ) -> None:
+        """Answer a 'why is the score X' reply directly from the stored
+        overall summary + evidence captured during !vibe. No LLM call."""
+        overall = payload.get("overall") or {}
+        try:
+            score = float(overall.get("score", 0.0))
+        except (TypeError, ValueError):
+            score = 0.0
+        summary = str(overall.get("summary") or "").strip()
+        evidence = str(overall.get("evidence") or "").strip()
+        evidence_tr = str(overall.get("evidence_translation") or "").strip()
+        count = int(payload.get("count", 0) or 0)
+        label, _ = get_vibe_label(score)
+
+        lines = [f"🔎 **vibe explained** — {label} ({score:+.2f})"]
+
+        if abs(score) <= 0.1:
+            lines.append(
+                f"> The score is neutral because none of the {count} "
+                f"analyzed messages carried clear emotional signal."
+            )
+        else:
+            if summary:
+                lines.append(f"> _{summary}_")
+            if evidence:
+                lines.append("")
+                lines.append(f"• {evidence}")
+                if evidence_tr:
+                    lines.append(f"   ↳ _{evidence_tr}_")
+            else:
+                # Old payload from before evidence was tracked, or a
+                # rare model miss. Be honest rather than guessing.
+                lines.append(
+                    "_(no specific evidence was recorded for this score — "
+                    "it may be unreliable)_"
+                )
 
         reply_msg = await message.reply("\n".join(lines)[:1990])
         await self._save_followup_context(reply_msg, message, payload)
