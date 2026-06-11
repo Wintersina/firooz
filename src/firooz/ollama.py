@@ -648,7 +648,7 @@ async def caption_image(image_bytes: bytes) -> str | None:
                     "images": [b64],
                     "options": {"temperature": 0, "seed": 0},
                 },
-                timeout=aiohttp.ClientTimeout(total=180),
+                timeout=aiohttp.ClientTimeout(total=240),
             ) as resp:
                 if resp.status != 200:
                     logger.error(
@@ -664,6 +664,41 @@ async def caption_image(image_bytes: bytes) -> str | None:
     except Exception:
         logger.exception("caption_image failed")
         return None
+
+
+async def warmup_models() -> None:
+    """Best-effort warmup of the text + vision models so the first
+    user-facing call doesn't pay Ollama's cold-load penalty. Errors are
+    logged and swallowed — warmup is nice-to-have, not required."""
+    for model in (MODEL, VISION_MODEL):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{OLLAMA_URL}/api/generate",
+                    json={
+                        "model": model,
+                        "stream": False,
+                        "prompt": "ping",
+                        # Generate a single token — we just want the model
+                        # paged into Ollama's memory, not actual output.
+                        "options": {"num_predict": 1},
+                    },
+                    timeout=aiohttp.ClientTimeout(total=300),
+                ) as resp:
+                    if resp.status == 200:
+                        logger.info("Ollama model warmed up: %s", model)
+                    else:
+                        logger.warning(
+                            "Ollama warmup for %s failed (status %d) — "
+                            "first call will pay cold-load cost",
+                            model, resp.status,
+                        )
+        except Exception as exc:
+            logger.warning(
+                "Ollama warmup for %s errored (%s) — first call will "
+                "pay cold-load cost",
+                model, exc,
+            )
 
 
 async def is_ollama_running() -> bool:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections import defaultdict
@@ -9,6 +10,7 @@ from discord.ext import commands
 
 from firooz.config import Config
 from firooz.database import KarmaDB
+from firooz.ollama import warmup_models
 
 logger = logging.getLogger("firooz")
 
@@ -171,5 +173,9 @@ def create_bot(config: Config, db: KarmaDB) -> commands.Bot:
         for cog_path in COGS:
             await bot.load_extension(cog_path)
             logger.info("Loaded extension: %s", cog_path)
+        # Background warmup — pages Ollama models into memory so the first
+        # vibe check / caption doesn't pay the cold-load cost. Fire and
+        # forget; failures are logged but don't block bot startup.
+        asyncio.create_task(warmup_models())
 
     return bot
