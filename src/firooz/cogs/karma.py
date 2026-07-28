@@ -56,36 +56,43 @@ def _describe_message(message: discord.Message) -> str:
             parts.append(embed.url)
     return "\n".join(parts) if parts else "(no text)"
 
-KARMA_REACTIONS: dict[str, int] = {
-    "\U0001f44d": 1,   # 👍
-    "\U0001f44e": -1,  # 👎
-    "\U0001f4af": 1,   # 💯
-    "\U0001f923": 2,   # 🤣 (rolling on floor gets 2)
-    "\U0001f602": 1,   # 😂 tears of joy
-    "\U0001f606": 1,   # 😆 grinning squinting
-    "\U0001f605": 1,   # 😅 sweat smile
-    "\U0001f604": 1,   # 😄 grinning with eyes
-    "\U0001f603": 1,   # 😃 grinning big eyes
-    "\U0001f601": 1,   # 😁 beaming grin
-    "\U0000263a\ufe0f": 1,  # ☺️ smiling
-    "\U0001f61c": 1,   # 😜 winking tongue
-    "\U0001f61d": 1,   # 😝 squinting tongue
-    "\U0001f911": 1,   # 🤑 money mouth (laughing variant)
+# Reactions that REMOVE karma. Anything not in this set grants +1
+# (or +2 if it's in SPECIAL_DOUBLES).
+NEGATIVE_REACTIONS: set[str] = {
+    "\U0001f44e",       # 👎 thumbs down
+    "\U0001f621",       # 😡 pouting / anger
+    "\U0001f92e",       # 🤮 vomit
+    "\U0001f4a9",       # 💩 poop
 }
 
-# Custom server emojis (matched by name)
-CUSTOM_KARMA_REACTIONS: dict[str, int] = {
-    "pornhub": 2,
+# Reactions that grant +2 instead of the default +1.
+SPECIAL_DOUBLES: set[str] = {
+    "\U0001f923",       # 🤣 rolling on floor laughing
 }
 
+# Custom server emojis matched by name (lowercased).
+CUSTOM_NEGATIVE_NAMES: set[str] = set()
+CUSTOM_DOUBLE_NAMES: set[str] = {"pornhub"}
 
-def _get_reaction_delta(emoji: discord.PartialEmoji) -> int | None:
-    """Get karma delta for a reaction emoji (unicode or custom)."""
+
+def _get_reaction_delta(emoji: discord.PartialEmoji) -> int:
+    """Karma delta for a reaction: -1 for negatives, +2 for doubles,
+    +1 for everything else."""
     if emoji.id is not None:
-        # Custom emoji — match by name
-        return CUSTOM_KARMA_REACTIONS.get(emoji.name or "")
-    # Unicode emoji — match by string
-    return KARMA_REACTIONS.get(str(emoji))
+        # Custom server emoji — match by name
+        name = (emoji.name or "").lower()
+        if name in CUSTOM_NEGATIVE_NAMES:
+            return -1
+        if name in CUSTOM_DOUBLE_NAMES:
+            return 2
+        return 1
+    # Unicode emoji — match by raw string
+    emoji_str = str(emoji)
+    if emoji_str in NEGATIVE_REACTIONS:
+        return -1
+    if emoji_str in SPECIAL_DOUBLES:
+        return 2
+    return 1
 
 
 def _find_bot_zone(guild: discord.Guild) -> discord.TextChannel | None:
@@ -139,11 +146,11 @@ class KarmaCog(commands.Cog, name="Karma"):
 
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
-        delta = _get_reaction_delta(payload.emoji)
-        if delta is None or payload.guild_id is None or payload.member is None:
+        if payload.guild_id is None or payload.member is None:
             return
         if payload.member.bot:
             return
+        delta = _get_reaction_delta(payload.emoji)
 
         channel = self.bot.get_channel(payload.channel_id)
         if not isinstance(channel, REACTABLE_CHANNEL_TYPES):
@@ -182,9 +189,9 @@ class KarmaCog(commands.Cog, name="Karma"):
 
     @commands.Cog.listener()
     async def on_raw_reaction_remove(self, payload: discord.RawReactionActionEvent) -> None:
-        delta = _get_reaction_delta(payload.emoji)
-        if delta is None or payload.guild_id is None:
+        if payload.guild_id is None:
             return
+        delta = _get_reaction_delta(payload.emoji)
 
         guild = self.bot.get_guild(payload.guild_id)
         if guild is None:
